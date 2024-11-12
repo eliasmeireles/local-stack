@@ -1,0 +1,74 @@
+#!/bin/bash
+
+set -e
+
+# Configuration for Multipass Instances
+EC2_CPU="4"
+EC2_MEM="16G"
+EC2_DISK="100G"
+TIMEOUT=120  # Timeout in seconds (1 minute)
+
+# Instance Names
+LOCALSTACK_INSTANCE_NAME="local-stack"
+
+# Directory paths for volume binding
+BIND_VOLUME_PATH="/media/eliasmeireles/docker/local-stack"
+LOCALSTACK_DATA_PATH="$BIND_VOLUME_PATH/localstack-data"  # Path for LocalStack persistent data
+
+# Create necessary directories
+rm -rf "$BIND_VOLUME_PATH"  # Remove existing directory
+mkdir -p "$BIND_VOLUME_PATH"
+mkdir -p "$LOCALSTACK_DATA_PATH"  # Create data directory for LocalStack
+
+# Base image for Multipass
+BASE_IMAGE="ubuntu"
+
+# Create and configure LocalStack instance
+echo "Creating LocalStack instance with additional AWS services..."
+multipass launch \
+ --name $LOCALSTACK_INSTANCE_NAME \
+ --cpus $EC2_CPU \
+ --memory $EC2_MEM \
+ --disk $EC2_DISK \
+ --mount "$BIND_VOLUME_PATH:/mnt/local-stack"
+
+# Copy setup.sh to the instance
+echo "Copying setup.sh to instance..."
+multipass transfer ./setup $LOCALSTACK_INSTANCE_NAME:/home/ubuntu/local-stack-setup
+multipass exec $LOCALSTACK_INSTANCE_NAME -- bash -c "
+    sudo mv /home/ubuntu/local-stack-setup /usr/local/bin/local-stack-setup &&
+    sudo chmod +x /usr/local/bin/local-stack-setup
+"
+
+# Run setup.sh on the instance
+echo "Running setup script on the instance..."
+multipass exec $LOCALSTACK_INSTANCE_NAME -- bash -c "local-stack-setup"
+
+# Restart the instance to apply Docker permissions
+echo "Restarting instance to apply Docker permissions..."
+multipass restart $LOCALSTACK_INSTANCE_NAME
+
+# Wait until the instance is back online, with a timeout
+echo "Waiting for the instance to be ready (timeout: $TIMEOUT seconds)..."
+SECONDS=0
+while ! multipass exec $LOCALSTACK_INSTANCE_NAME -- echo "Instance is ready" &> /dev/null; do
+    sleep 2
+    if [ $SECONDS -ge $TIMEOUT ]; then
+        echo "Error: Instance did not become ready within the timeout period ($TIMEOUT seconds)."
+        exit 1
+    fi
+done
+
+# Start LocalStack with DATA_DIR environment variable
+echo "Starting LocalStack in Docker mode with persistent data directory..."
+multipass exec $LOCALSTACK_INSTANCE_NAME -- bash -c "
+    source /home/ubuntu/localstack-env/bin/activate &&
+    export DATA_DIR=/mnt/local-stack/localstack-data &&
+    localstack start -d &&
+    sleep 10 &&
+    localstack status services    
+"
+
+echo "LocalStack instance setup and started successfully with data persistence!"
+
+multipass exec $LOCALSTACK_INSTANCE_NAME -- bash
